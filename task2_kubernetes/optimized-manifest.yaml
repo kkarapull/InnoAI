@@ -1,0 +1,147 @@
+# 1. SECRET MANAGEMENT
+# Create this secret object first to store sensitive data.
+# Apply it with `kubectl apply -f secret.yaml`
+# ---
+# apiVersion: v1
+# kind: Secret
+# metadata:
+#   name: payment-service-secrets
+#   namespace: production
+# type: Opaque
+# data:
+#   DB_PASSWORD: "ZGItcGFzc3dvcmQtMTIzLWNoYW5nZWQ=" # Base64 encoded password
+#   API_KEY: "c2tfdGVzdF9hYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5ejEyMzQ1Ng==" # Base64 encoded API key
+---
+# 2. HIGH AVAILABILITY: PodDisruptionBudget
+# Ensures that a minimum number of pods are running during voluntary disruptions.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: payment-service-pdb
+  namespace: production
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: payment-service
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment-service
+  namespace: production
+spec:
+  # 3. RELIABILITY: Increased replica count for high availability.
+  replicas: 2
+  selector:
+    matchLabels:
+      app: payment-service
+  template:
+    metadata:
+      labels:
+        app: payment-service
+    spec:
+      # 4. SECURITY: Use a dedicated service account
+      serviceAccountName: payment-service-sa
+      containers:
+      - name: payment-api
+        # 5. BEST PRACTICE: Use a specific, immutable image tag instead of 'latest'.
+        image: company/payment-service:1.2.3
+        ports:
+        - containerPort: 8080
+        env:
+        # 6. SECURITY: Reference secrets from a Secret object, do not hardcode them.
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: payment-service-secrets
+              key: DB_PASSWORD
+        - name: API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: payment-service-secrets
+              key: API_KEY
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "250m"
+          limits:
+            memory: "128Mi"
+            cpu: "500m"
+        # 7. SECURITY: Apply security context to run as a non-root user and drop privileges.
+        securityContext:
+          allowPrivilegeEscalation: false
+          runAsNonRoot: true
+          runAsUser: 10001
+          capabilities:
+            drop:
+              - "ALL"
+        # 8. RELIABILITY: Add a liveness probe to restart the container if it's unhealthy.
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 5
+---
+# 9. BEST PRACTICE: Use ClusterIP for internal services and expose via Ingress.
+# This prevents direct exposure to the internet.
+apiVersion: v1
+kind: Service
+metadata:
+  name: payment-service
+  namespace: production
+spec:
+  selector:
+    app: payment-service
+  ports:
+  - port: 80
+    targetPort: 8080
+  type: ClusterIP
+---
+# 10. NETWORKING: Add an Ingress to manage external access to the service.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: payment-service-ingress
+  namespace: production
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+spec:
+  rules:
+  - http:
+      paths:
+      - path: /payments
+        pathType: Prefix
+        backend:
+          service:
+            name: payment-service
+            port:
+              number: 80
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: payment-service-hpa
+  namespace: production
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: payment-service
+  # 11. RELIABILITY: Set minReplicas to match the deployment's desired state for availability.
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 80
